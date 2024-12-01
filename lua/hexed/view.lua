@@ -210,14 +210,16 @@ local function do_draw_buf(buf)
     end
 
     for _, fold in ipairs(folds) do
-        vim.cmd(fold[1] .. "," .. fold[2] .. "fold")
+        api.nvim_buf_call(buf, function()
+            vim.cmd(fold[1] .. "," .. fold[2] .. "fold")
+        end)
     end
 
     api.nvim_buf_clear_namespace(buf, diagns, 0, -1)
     vim.bo[buf].modified = false
 end
 
-local function mirror_cursor_movement(buf)
+local function mirror_cursor_to_view(buf)
     local data = bufdata[buf]
     local row, col = unpack(api.nvim_win_get_cursor(data.win))
 
@@ -272,6 +274,21 @@ local function mirror_cursor_movement(buf)
     end
 
     api.nvim_buf_add_highlight(data.view_buf, hlns, "HexedChar", cursor_row - 1, cursor_col, cursor_col + 1)
+end
+
+local function mirror_cursor_from_view(buf)
+    local data = bufdata[buf]
+    local row, col = unpack(api.nvim_win_get_cursor(data.view_win))
+
+    local bpos = vim.fn.line2byte(row) + col - 1
+
+    local bytes_per_row = data.elems_per_line * 2
+
+    local target_row = math.floor(bpos / bytes_per_row)
+    local byte_in_row = bpos - (target_row * bytes_per_row)
+    local whitespace = math.floor(byte_in_row * 0.5)
+
+    api.nvim_win_set_cursor(data.win, { target_row + 1, whitespace + (2 * byte_in_row) + 10 })
 end
 
 local function parse_buf_and_write(buf)
@@ -391,7 +408,18 @@ function M.edit_file(file)
         group = augroup,
         buffer = buf,
         callback = function()
-            mirror_cursor_movement(buf)
+            if not (vim.bo[buf].modified or vim.bo[view_buf].modified) then
+                mirror_cursor_to_view(buf)
+            end
+        end,
+    })
+    aucmd("CursorMoved", {
+        group = augroup,
+        buffer = view_buf,
+        callback = function()
+            if not (vim.bo[buf].modified or vim.bo[view_buf].modified) then
+                mirror_cursor_from_view(buf)
+            end
         end,
     })
     aucmd("BufWritePost", {
@@ -419,6 +447,24 @@ function M.edit_file(file)
         buffer = buf,
         callback = function()
             api.nvim_del_augroup_by_id(augroup)
+            bufdata[buf] = nil
+        end
+    })
+    aucmd("WinLeave", {
+        group = augroup,
+        buffer = buf,
+        callback = function()
+            api.nvim_buf_clear_namespace(view_buf, hlns, 0, -1)
+        end
+    })
+    aucmd("WinClosed", {
+        group = augroup,
+        buffer = buf,
+        callback = function()
+            api.nvim_del_augroup_by_id(augroup)
+            api.nvim_buf_delete(buf, {})
+            bufdata[buf] = nil
+            vim.wo[view_win][0].list = false
         end
     })
 
