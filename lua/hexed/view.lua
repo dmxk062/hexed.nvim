@@ -24,6 +24,7 @@ local bufdata = {}
 
 local diagns = api.nvim_create_namespace("HexedDiagnostic")
 local hlns = api.nvim_create_namespace("HexedHighlights")
+local curhlns = api.nvim_create_namespace("HexedCursor")
 
 ffi.cdef [[
 typedef struct FILE FILE;
@@ -261,22 +262,23 @@ local function mirror_cursor_to_view(buf)
     end)
 
     api.nvim_win_set_cursor(data.view_win, { cursor_row, cursor_col })
-    api.nvim_buf_clear_namespace(data.view_buf, hlns, 0, -1)
+    api.nvim_buf_clear_namespace(data.view_buf, curhlns, 0, -1)
 
     if start_row == end_row then
-        api.nvim_buf_add_highlight(data.view_buf, hlns, "HexedRegion", start_row - 1, start_col, end_col)
+        api.nvim_buf_add_highlight(data.view_buf, curhlns, "HexedRegion", start_row - 1, start_col, end_col)
     else
-        api.nvim_buf_add_highlight(data.view_buf, hlns, "HexedRegion", start_row - 1, start_col, -1)
+        api.nvim_buf_add_highlight(data.view_buf, curhlns, "HexedRegion", start_row - 1, start_col, -1)
         for i = start_row, end_row - 2 do
-            api.nvim_buf_add_highlight(data.view_buf, hlns, "HexedRegion", i, 0, -1)
+            api.nvim_buf_add_highlight(data.view_buf, curhlns, "HexedRegion", i, 0, -1)
         end
-        api.nvim_buf_add_highlight(data.view_buf, hlns, "HexedRegion", end_row - 1, 0, end_col)
+        api.nvim_buf_add_highlight(data.view_buf, curhlns, "HexedRegion", end_row - 1, 0, end_col)
     end
 
-    api.nvim_buf_add_highlight(data.view_buf, hlns, "HexedChar", cursor_row - 1, cursor_col, cursor_col + 1)
+    api.nvim_buf_add_highlight(data.view_buf, curhlns, "HexedChar", cursor_row - 1, cursor_col, cursor_col + 1)
 end
 
 local function mirror_cursor_from_view(buf)
+    api.nvim_buf_clear_namespace(buf, curhlns, 0, -1)
     local data = bufdata[buf]
     local row, col = unpack(api.nvim_win_get_cursor(data.view_win))
 
@@ -287,8 +289,10 @@ local function mirror_cursor_from_view(buf)
     local target_row = math.floor(bpos / bytes_per_row)
     local byte_in_row = bpos - (target_row * bytes_per_row)
     local whitespace = math.floor(byte_in_row * 0.5)
+    local target_col = whitespace + (2 * byte_in_row) + 10
 
-    api.nvim_win_set_cursor(data.win, { target_row + 1, whitespace + (2 * byte_in_row) + 10 })
+    api.nvim_win_set_cursor(data.win, { target_row + 1, target_col })
+    api.nvim_buf_add_highlight(buf, curhlns, "HexedChar", target_row, target_col, target_col + 2)
 end
 
 local function parse_buf_and_write(buf)
@@ -442,30 +446,43 @@ function M.edit_file(file)
             end
         end
     })
-    aucmd("BufDelete", {
-        group = augroup,
-        buffer = buf,
-        callback = function()
-            api.nvim_del_augroup_by_id(augroup)
-            bufdata[buf] = nil
-        end
-    })
+
+    -- stop hl of cursor position when outside buf
     aucmd("WinLeave", {
         group = augroup,
         buffer = buf,
         callback = function()
-            api.nvim_buf_clear_namespace(view_buf, hlns, 0, -1)
+            api.nvim_buf_clear_namespace(view_buf, curhlns, 0, -1)
         end
+    })
+    aucmd("WinLeave", {
+        group = augroup,
+        buffer = view_buf,
+        callback = function()
+            api.nvim_buf_clear_namespace(buf, curhlns, 0, -1)
+        end
+    })
+
+    local function shutdown()
+        api.nvim_del_augroup_by_id(augroup)
+        bufdata[buf] = nil
+        vim.wo[view_win][0].list = false
+    end
+
+    aucmd("BufDelete", {
+        group = augroup,
+        buffer = buf,
+        callback = shutdown
     })
     aucmd("WinClosed", {
         group = augroup,
         buffer = buf,
-        callback = function()
-            api.nvim_del_augroup_by_id(augroup)
-            api.nvim_buf_delete(buf, {})
-            bufdata[buf] = nil
-            vim.wo[view_win][0].list = false
-        end
+        callback = shutdown
+    })
+    aucmd("WinClosed", {
+        group = augroup,
+        buffer = view_buf,
+        callback = shutdown
     })
 
     do_draw_buf(buf)
