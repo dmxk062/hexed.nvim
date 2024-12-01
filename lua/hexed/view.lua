@@ -17,6 +17,7 @@ local strbuffer = require("string.buffer")
 ---@field cached_text string[]?
 ---@field cached_hls string[]?
 ---@field do_reread boolean
+---@field holes [integer, integer][] Start/end of all all-zero areas
 
 ---@type table<integer, hexed_bufdata>
 local bufdata = {}
@@ -52,6 +53,11 @@ local function parse_file(buf)
 
     local text = {}
     local hls = {}
+
+    local index = 0
+
+    local holes = {}
+    local hole_start, hole_end
     while true do
         local num_read = tonumber(ffi.C.fread(buffer, 1, bufsize, stream))
         if num_read == 0 then
@@ -63,6 +69,10 @@ local function parse_file(buf)
             local hl
 
             if byte == 0 then
+                if not hole_start then
+                    hole_start = index
+                end
+                hole_end = index
                 hl = "HexedNull"
             elseif byte >= 32 and byte < 127 then
                 hl = "HexedString"
@@ -72,13 +82,23 @@ local function parse_file(buf)
                 hl = "HexedByte"
             end
 
+            if byte ~= 0 or i == num_read - 1 then
+                if hole_start and hole_end - hole_start > 16 then
+                    table.insert(holes, { hole_start, hole_end })
+                end
+                hole_start = nil
+            end
+
             table.insert(text, string.format("%02X", byte))
             table.insert(hls, hl)
+
+            index = index + 1
         end
     end
 
     bufdata[buf].cached_text = text
     bufdata[buf].cached_hls = hls
+    bufdata[buf].holes = holes
     ffi.C.fclose(stream)
 end
 
@@ -96,6 +116,9 @@ local function do_draw_buf(buf)
     local num_elems = data.elems_per_line
     local num_bytes = num_elems * 2
 
+    local cur_fold = {}
+    local folds = {}
+
     local addr = 0
     local text = data.cached_text
     local cur_txt = { "00000000:" }
@@ -110,8 +133,26 @@ local function do_draw_buf(buf)
         end
         table.insert(cur_txt, (text[i] .. text[i + 1]))
 
-        -- next line
-        if (i + 1) % num_bytes == 0 then
+        -- new line
+        if (i - 1) % num_bytes == 0 then
+            local in_hole = false
+            local line = math.floor(i / num_bytes)
+            for _, hole in pairs(data.holes) do
+                if hole[1] <= i - 1 and hole[2] >= (i + num_bytes) - 2 then
+                    cur_fold[2] = line + 1
+                    if not cur_fold[1] then
+                        cur_fold[1] = line + 1
+                    end
+                    in_hole = true
+                    break
+                end
+            end
+            if not in_hole and cur_fold[1] then
+                table.insert(folds, cur_fold)
+                cur_fold = {}
+            end
+            -- next line
+        elseif (i + 1) % num_bytes == 0 then
             addr = addr + num_bytes
 
             table.insert(lines, table.concat(cur_txt, " "))
@@ -120,6 +161,9 @@ local function do_draw_buf(buf)
     end
     if #cur_txt > 1 then
         table.insert(lines, table.concat(cur_txt, " "))
+    end
+    if cur_fold[2] then
+        table.insert(folds, cur_fold)
     end
 
     local hl_elems = data.cached_hls
@@ -163,6 +207,10 @@ local function do_draw_buf(buf)
         for _, hl in ipairs(hlline) do
             api.nvim_buf_add_highlight(buf, hlns, hl[1], i - 1, hl[2], hl[3])
         end
+    end
+
+    for _, fold in ipairs(folds) do
+        vim.cmd(fold[1] .. "," .. fold[2] .. "fold")
     end
 
     api.nvim_buf_clear_namespace(buf, diagns, 0, -1)
